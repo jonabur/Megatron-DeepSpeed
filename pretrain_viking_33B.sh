@@ -47,8 +47,8 @@ LEARNING_RATE=1.5e-4    # Llama2 34B
 set -euo pipefail
 
 # symlink logs/latest.out and logs/latest.err
-ln -f -s "${SLURM_JOB_ID}-33B.out" logs/latest.out
-ln -f -s "${SLURM_JOB_ID}-33B.err" logs/latest.err
+ln -f -s "${SLURM_JOB_ID}-33B.out" logs-33B/latest.out
+ln -f -s "${SLURM_JOB_ID}-33B.err" logs-33B/latest.err
 
 CHECKPOINT_PATH=/scratch/project_462000086/viking-v2/33B
 TENSORBOARD_PATH="tensorboard/33B.${SLURM_JOB_ID}"
