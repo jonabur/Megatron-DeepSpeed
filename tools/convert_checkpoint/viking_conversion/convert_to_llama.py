@@ -41,8 +41,11 @@ import torch
 import wget
 from transformers import AutoTokenizer, LlamaConfig
 import sys
-sys.path.append('/scratch/project_462000319/rluukkon/lumi-llm-scaling/meg-ds-sing-microsoft')
-
+# change path to a relative path
+# sys.path.append('/scratch/project_462000319/rluukkon/lumi-llm-scaling/meg-ds-sing-microsoft')
+sys.path.append(os.path.abspath(
+    os.path.join(os.path.dirname(__file__),
+                    os.path.pardir)))
 
 # Edited to be compatible with Megatron-DeepSpeed
 ####################################################################################################
@@ -149,19 +152,6 @@ def convert_megatron_checkpoint(args, input_state_dict, config):
     # Truncate the embedding table to vocab_size rows.
     word_embeddings = word_embeddings[: config.vocab_size, :]
     output_state_dict["model.embed_tokens.weight"] = word_embeddings
-
-    # The position embeddings.
-    # pos_embeddings = embeddings["position_embeddings"]["weight"]
-    # Dummy embeddings for test
-    # pos_embeddings = torch.zeros((2048, 1024))
-    # Read the causal mask dimension (seqlen). [max_sequence_length, hidden_size]
-    # n_positions = pos_embeddings.size(0)
-    # if n_positions != config.n_positions:
-    #     raise ValueError(
-    #         f"pos_embeddings.max_sequence_length={n_positions} and config.n_positions={config.n_positions} don't match"
-    #     )
-    # # Store the position embeddings.
-    # output_state_dict["transformer.wpe.weight"] = pos_embeddings
 
     # The transformer.
     transformer = lm["transformer"] if "transformer" in lm.keys() else lm["encoder"]
@@ -297,121 +287,6 @@ def convert_megatron_checkpoint(args, input_state_dict, config):
     # It should be done!
     return output_state_dict
 
-    # # The simple map of names for "automated" rules.
-    # megatron_to_transformers = {
-    #     # "attention.dense": ".attn.c_proj.",
-    #     "self_attention.dense": ".self_attn.o_proj.",
-    #     "mlp.dense_h_to_4h": ".mlp.up_proj.",
-    #     "mlp.dense_4h_to_h": ".mlp.down_proj.",
-    # }
-    # n_positions = config.max_position_embeddings
-    # # Extract the layers.
-    # for key, val in transformer.items():
-    #     # Match the name.
-    #     m = layer_re.match(key)
-
-    #     # Stop if that's not a layer
-    #     if m is None:
-    #         break
-
-    #     # The index of the layer.
-    #     layer_idx = int(m.group(1))
-    #     # The name of the operation.
-    #     op_name = m.group(2)
-    #     # Is it a weight or a bias?
-    #     weight_or_bias = m.group(3)
-
-    #     # The name of the layer.
-    #     layer_name = f"model.layers.{layer_idx}"
-
-    #     # For layernorm(s), simply store the layer norm.
-    #     if op_name.endswith("layernorm"):
-    #         ln_name = "input_layernorm" if op_name.startswith("input") else "post_attention_layernorm"
-    #         output_state_dict[layer_name + "." + ln_name + "." + weight_or_bias] = val
-
-    #     elif op_name == "self_attention.query":
-    #         hidden_size = val.shape[-1]
-    #         output_state_dict[layer_name + ".self_attn.q_proj.weight"] = val.view(heads,1, hidden_size_per_head, hidden_size).transpose(0,1).contiguous().view((1024,1024))
-
-    #     elif op_name == "self_attention.key_value":
-    #         splits = 2
-    #         ### Ensure that num_key_value heads is the one here! 
-    #         hidden_size = val.shape[-1]
-    #         key, value = val.view(config.num_key_value_heads, 2, hidden_size_per_head, hidden_size).transpose(0,1).contiguous().view((512,1024)).split(val.shape[0]//splits)
-    #         output_state_dict[layer_name + ".self_attn.v_proj.weight"] = value
-    #         output_state_dict[layer_name + ".self_attn.k_proj.weight"] = key
-    #     elif (
-    #         op_name == "attention.query_key_value" or op_name == "self_attention.query_key_value"
-    #     ) and weight_or_bias == "weight":
-    #         # Insert a tensor of 1x1xDxD bias.
-    #         causal_mask = torch.tril(torch.ones((n_positions, n_positions), dtype=torch.float16)).view(
-    #             1, 1, n_positions, n_positions
-    #         )
-    #         output_state_dict[layer_name + ".self_attn.bias"] = causal_mask
-
-    #         # Insert a "dummy" tensor for masked_bias.
-    #         masked_bias = torch.tensor(-1e4, dtype=torch.float16)
-    #         output_state_dict[layer_name + ".self_attn.masked_bias"] = masked_bias
-
-    #         query, key, val = fix_query_key_value_ordering(val, checkpoint_version, 3, heads, hidden_size_per_head).split(heads*hidden_size_per_head)
-    #         # Megatron stores (3*D) x D but transformers-GPT2 expects D x 3*D.
-    #         #### This is only valid if using Conv1D as defined in GPT2, for nn.Linear needs to be removed
-    #         # out_val = out_val.transpose(0, 1).contiguous()
-    #         # Store.
-    #         output_state_dict[layer_name + ".self_attn.q_proj.weight"] = query 
-    #         output_state_dict[layer_name + ".self_attn.k_proj.weight"] = key 
-    #         output_state_dict[layer_name + ".self_attn.v_proj.weight"] = val
-
-    #     # Transpose the bias.
-    #     elif (
-    #         op_name == "attention.query_key_value" or op_name == "self_attention.query_key_value"
-    #     ) and weight_or_bias == "bias":
-    #         out_val = fix_query_key_value_ordering(val, checkpoint_version, 3, heads, hidden_size_per_head)
-    #         # Store. No change of shape.
-    #         output_state_dict[layer_name + ".self_attn.q_proj.bias"] = query 
-    #         output_state_dict[layer_name + ".self_attn.k_proj.bias"] = key 
-    #         output_state_dict[layer_name + ".self_attn.v_proj.bias"] = val
-
-
-    #     # Transpose the weights.
-    #     elif weight_or_bias == "weight":
-    #         out_name = megatron_to_transformers[op_name]
-    #         ### (don't remember this comment. seems to work) # This is wrong for 
-    #         output_state_dict[layer_name + out_name + "weight"] = val#.transpose(0, 1)
-
-    #     # Copy the bias.
-    #     elif weight_or_bias == "bias":
-    #         out_name = megatron_to_transformers[op_name]
-    #         output_state_dict[layer_name + out_name + "bias"] = val
-
-    # # DEBUG.
-    # assert config.num_hidden_layers == layer_idx + 1
-
-    # # The final layernorm.
-    # # else:
-    # # if config.untie_embeddings_and_output_weights:
-    # #     output_layer_name = 'layers.24'
-    # # else:
-    # #     output_layer_name = "final_layernorm"
-
-    # # output_state_dict["model.norm.weight"] = transformer[output_layer_name + ".weight"]
-    
-    # # try:
-    # #     output_state_dict["model.norm.bias"] = transformer[output_layer_name + ".bias"]
-
-    # # except:
-    # #     output_state_dict['model.norm.bias'] = torch.zeros(transformer[output_layer_name + '.weight'].shape)
-
-    # # if config.untie_embeddings_and_output_weights:
-    # #     output_state_dict['lm_head.weight'] = transformer["final_layernorm.lm_head.weight"]
-    # # else:
-    # #     output_state_dict["lm_head.weight"] = word_embeddings
-
-    # output_state_dict['lm_head.weight'] = lm["output_layer"]["weight"]
-    # output_state_dict['model.norm.weight'] = transformer["final_layernorm.weight"]
-    # # It should be done!
-    # return output_state_dict
-
 
 ####################################################################################################
 
@@ -506,33 +381,6 @@ def main():
     if args.print_checkpoint_structure:
         recursive_print(None, output_state_dict)
 
-    # # Add tokenizer class info to config
-    # # see https://github.com/huggingface/transformers/issues/13906)
-    # if ds_args is not None:
-    #     tokenizer_type = ds_args.tokenizer_type
-    #     if tokenizer_type == "GPT2BPETokenizer":
-    #         tokenizer_model_name = "gpt2"
-    #     elif tokenizer_type == "PretrainedFromHF":
-    #         tokenizer_model_name = ds_args.tokenizer_name_or_path
-    #     else:
-    #         raise ValueError(f"Unrecognized tokenizer_type {tokenizer_type}")
-    # else:
-    #     tokenizer_model_name = "gpt2"
-
-    # tokenizer = AutoTokenizer.from_pretrained(tokenizer_model_name)
-    # tokenizer_class = type(tokenizer).__name__
-    # config.tokenizer_class = tokenizer_class
-    # config.architectures = ["LlamaForCausalLM"]
-    config.auto_map = {
-        "AutoConfig" : "configuration_megatron_llama.MegatronLlamaConfig",
-        "AutoModelForCausalLM": "modeling_megatron_llama.MegatronLlamaForCausalLM"
-        }
-    
-    print("Getting modeling and configuration files for HF-compatibility")
-    url_modeling_file =  "https://gist.githubusercontent.com/luukkonenr/9e048495c179271c861726035d3823e2/raw/33fcefeb4d72635e29db51219553f4f55a882ba0/modeling_megatron_llama.py"
-    url_configuration_file = "https://gist.githubusercontent.com/luukkonenr/f9f52833aae2bf2889936d807341e8b1/raw/27eb5c8762d0e38dda979bbbd345f9a83dadbdc8/configuration_megatron_llama.py"
-    #wget.download(url_modeling_file, out=args.output_dir)
-    #wget.download(url_configuration_file, out=args.output_dir)
     # Store the config to file.
     print("Saving config")
     config.save_pretrained(args.output_dir)
