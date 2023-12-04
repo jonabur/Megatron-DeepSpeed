@@ -10,7 +10,7 @@
 #SBATCH --gpus-per-node=mi250:8
 #SBATCH --exclusive=user
 #SBATCH --hint=nomultithread
-#SBATCH --account=project_462000086
+#SBATCH --account=project_462000353
 #SBATCH --output=logs-33B/%j-33B.out
 #SBATCH --error=logs-33B/%j-33B.err
 #SBATCH --exclude=nid005138
