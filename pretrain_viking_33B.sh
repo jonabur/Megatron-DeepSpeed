@@ -13,6 +13,7 @@
 #SBATCH --account=project_462000086
 #SBATCH --output=logs-33B/%j-33B.out
 #SBATCH --error=logs-33B/%j-33B.err
+#SBATCH --exclude=nid005138
 
 mkdir -p workdir
 wd=$(realpath workdir)
@@ -129,6 +130,9 @@ GPT_ARGS=" \
     --use-distributed-optimizer \
     --use-flash-attn-v2 \
     --use-rotary-position-embeddings \
+    --attention-dropout 0 \
+    --hidden-dropout 0 \
+    --no-query-key-layer-scaling \
     $OPTIMIZER_ARGS \
     "
 
