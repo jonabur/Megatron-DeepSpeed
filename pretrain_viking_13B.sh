@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name=viking_v2_13B
+#SBATCH --job-name=viking_v2_13B_high_eps
 #SBATCH --nodes=128
 #SBATCH --cpus-per-task=7
 #SBATCH --ntasks-per-node=8
@@ -11,9 +11,10 @@
 #SBATCH --exclusive=user
 #SBATCH --hint=nomultithread
 #SBATCH --account=project_462000353
-#SBATCH --output=logs-13B/%j-13B.out
-#SBATCH --error=logs-13B/%j-13B.err
+#SBATCH --output=logs-13B_high_eps/%j-13B_high_eps.out
+#SBATCH --error=logs-13B_high_eps/%j-13B_high_eps.err
 #SBATCH --exclude=nid005138
+#SBATCH --exclude=nid005138,nid006369,nid005796
 
 mkdir -p workdir
 wd=$(realpath workdir)
@@ -49,11 +50,11 @@ LEARNING_RATE=3e-4
 set -euo pipefail
 
 # symlink logs/latest.out and logs/latest.err
-ln -f -s "${SLURM_JOB_ID}-13B.out" logs-13B/latest.out
-ln -f -s "${SLURM_JOB_ID}-13B.err" logs-13B/latest.err
+ln -f -s "${SLURM_JOB_ID}-13B_high_eps.out" logs-13B_high_eps/latest.out
+ln -f -s "${SLURM_JOB_ID}-13B_high_eps.err" logs-13B_high_eps/latest.err
 
-CHECKPOINT_PATH=/scratch/project_462000086/viking-v2/13B
-TENSORBOARD_PATH="tensorboard/13B.${SLURM_JOB_ID}"
+CHECKPOINT_PATH=/scratch/project_462000086/viking-v2/13B_high_eps
+TENSORBOARD_PATH="tensorboard/13B_high_eps.${SLURM_JOB_ID}"
 #rm -rf "$CHECKPOINT_PATH" "$TENSORBOARD_PATH" # Start from scratch
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1
@@ -95,7 +96,7 @@ OPTIMIZER_ARGS=" \
     --optimizer adam \
     --adam-beta1 0.9 \
     --adam-beta2 0.95 \
-    --adam-eps 1e-8 \
+    --adam-eps 1e-5 \
     --lr $LEARNING_RATE \
     --min-lr 3e-5 \
     --lr-decay-style cosine \
