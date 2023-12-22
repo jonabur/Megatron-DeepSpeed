@@ -42,7 +42,7 @@ import wget
 from transformers import AutoTokenizer, LlamaConfig
 import sys
 # change path to a relative path
-# sys.path.append('/scratch/project_462000319/rluukkon/lumi-llm-scaling/meg-ds-sing-microsoft')
+sys.path.append('/scratch/project_462000319/rluukkon/Megatron-DeepSpeed-jonabur/')
 sys.path.append(os.path.abspath(
     os.path.join(os.path.dirname(__file__),
                     os.path.pardir)))
@@ -72,6 +72,7 @@ def recursive_print(name, val, spaces=0):
 
 
 def fix_query_key_value_ordering(param, checkpoint_version, num_splits, num_heads, hidden_size):
+    print(f"Fix qkv_ord: num_splits: {num_splits} num_heads: {num_heads}, hidden_size: {hidden_size}")
     # Permutes layout of param tensor to [num_splits * num_heads * hidden_size, :]
     # for compatibility with later versions of NVIDIA Megatron-LM.
     # The inverse operation is performed inside Megatron-LM to read checkpoints:
@@ -234,7 +235,8 @@ def convert_megatron_checkpoint(args, input_state_dict, config):
         )   and weight_or_bias == "weight":
             #print(f">> key_value origin size: {val.size()}")
             size_per_weight = val.size(0) // 2
-            out_val = fix_query_key_value_ordering(val, checkpoint_version, 2, heads//4, hidden_size_per_head)
+            kv_groups = config.num_attention_heads//config.num_key_value_heads
+            out_val = fix_query_key_value_ordering(val, checkpoint_version, 2, heads//kv_groups, hidden_size_per_head)
             #print(f">> key_value output size: {out_val.size()}")
             out_val = out_val.contiguous()
             output_state_dict[layer_name + ".self_attn.k_proj.weight"] = out_val[:size_per_weight, :]
@@ -370,7 +372,7 @@ def main():
     else:
         config = LlamaConfig.from_json_file(args.config_file)
 
-    config.architectures = ["LlamaForCausalLM"]
+    config.architectures = ["LLaMAForCausalLM"]
 
     # Convert.
     print("Converting")
@@ -394,7 +396,7 @@ def main():
     print(f'Saving checkpoint to "{output_checkpoint_file}"')
     torch.save(output_state_dict, output_checkpoint_file)
     print("Done")
-    print("Untied embeddings are not likely working as expected yet! Model conversion can seemingly work.")
+    # print("Untied embeddings are not likely working as expected yet! Model conversion can seemingly work.")
     
 
 

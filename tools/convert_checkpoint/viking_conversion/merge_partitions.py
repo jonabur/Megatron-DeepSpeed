@@ -9,7 +9,10 @@ import os
 # swiglu
 # rotary positional
 # embeddings
+# no bias (for bias just add '.bias' in addition to '.weight')
+
     # Search in directory above this
+sys.path.append("/scratch/project_462000319/rluukkon/Megatron-DeepSpeed-jonabur")
 sys.path.append(os.path.abspath(
     os.path.join(os.path.dirname(__file__),
                     os.path.pardir)))
@@ -44,9 +47,11 @@ def add_or_combine_to_dict(target, shard, target_key, dim=0):
     # key = new_key if new_key else target_key
     if target_value != None:
         target[target_key] = torch.cat([target_value, shard], dim=dim)
+        print(f"Adding {target_key}. New shape: {target[target_key].shape}")
     else:
         target[target_key] = shard
 
+# 
 def combine_swiglu_mlp(encoder):
     up_layer_keys = sorted([k for k in encoder.keys() if "h_to_4h.weight.up_proj" in k])
     gate_layer_keys = sorted([k for k in encoder.keys() if "h_to_4h.weight.gate_proj" in k])
@@ -57,7 +62,22 @@ def combine_swiglu_mlp(encoder):
         # delete temp proj keys
         encoder[".".join(up_key.split(".")[:-1])] = torch.cat([up, gate], dim=0)
 
-
+# from megatron-deepspeed. Attempt to replicate the logic from Meg-DS.
+def split_gqa_tensor(mixed_x_layer, num_key_value_groups, hidden_size_per_attention_head):
+    new_tensor_shape = mixed_x_layer.size()[:-1] + \
+                (-1, (num_key_value_groups + 2),
+                    hidden_size_per_attention_head)
+    mixed_x_layer = mixed_x_layer.view(*new_tensor_shape)
+    print("Shape at start", mixed_x_layer.shape)
+    print(f"> reshape: {mixed_x_layer.shape[:2]} + {(-1, hidden_size_per_attention_head)}")
+    query_layer = mixed_x_layer[:, :, :, :-2, :].reshape(mixed_x_layer.shape[:2] + (-1, hidden_size_per_attention_head))
+    print(f"> q {query_layer.shape}")
+    key_layer = mixed_x_layer[:, :, :, -2, :]
+    print(f"> k {key_layer.shape}")
+    value_layer = mixed_x_layer[:, :, :, -1, :]
+    print(f"> v {value_layer.shape}")
+    kv_layer = torch.cat([key_layer,value_layer], dim=0)
+    return query_layer, kv_layer
 
 
 def main():
@@ -74,8 +94,12 @@ def main():
 
 
     args = parser.parse_args()
-    chunks = [pt.absolute() for pt in Path(args.path_to_checkpoint).glob("*/*")]
+    chunks = [pt.absolute() for pt in Path(args.path_to_checkpoint).glob("*/model_optim_rng.pt")]
     chunks = sorted(chunks)
+    
+    print("Found chunks")
+    for chunk in chunks:
+        print(chunk)
     cp_args = None 
     vp_size = 0
     tp_size = 0
@@ -90,8 +114,13 @@ def main():
     tokens = ""
     # Looping order: TP_PP 00_000, 00_001, ..., 01_000, ... 
     for i, chunk in enumerate(chunks):
-        tp_rank, pp_rank = PARALLEL_RANK_PATTERN.search(str(chunk)).group().split("_")[-2:]
-        tp_rank, pp_rank = int(tp_rank), int(pp_rank)
+
+        if len(chunks) == 1:
+            tp_rank = pp_rank = 0
+        else:
+            tp_rank, pp_rank = PARALLEL_RANK_PATTERN.search(str(chunk)).group().split("_")[-2:]
+            tp_rank, pp_rank = int(tp_rank), int(pp_rank)
+
 
         print("processing #", chunk.absolute())
         print(f"tp_rank: {tp_rank}, pp_rank: {pp_rank}")
@@ -99,7 +128,7 @@ def main():
         shard = torch.load(chunk, map_location='cuda')
         if i == 0:
             cp_args = shard['args']
-            vp_size = cp_args.virtual_pipeline_model_parallel_size
+            vp_size = cp_args.virtual_pipeline_model_parallel_size if cp_args.virtual_pipeline_model_parallel_size else 1
             vp_layers = cp_args.num_layers_per_virtual_pipeline_stage
             pp_size = cp_args.pipeline_model_parallel_size
             tp_size = cp_args.tensor_model_parallel_size
@@ -107,73 +136,87 @@ def main():
             iteration = shard['iteration']
             cp_version = shard['checkpoint_version']
             tokens = shard['tokens']
+            assert int(pp_size)*int(tp_size)==len(chunks), "Number of shard paths and no. shards in arguments differ!"
         
-        if vp_size == 1:
-            #TODO
-            assert False, "Not yet implemented"
-            lm = shard['model']['language_model']
-        
-        else:
-            for vp_rank in range(vp_size):
-                # test vp offsetting by having model splitted up into layers / (pp_size *vp_layers). With layers=40, pp=4, vp_layers=5 -> model is split into shards: 5x4x2
+        for vp_rank in range(vp_size):
+            # test vp offsetting by having model splitted up into layers / (pp_size *vp_layers). With layers=40, pp=4, vp_layers=5 -> model is split into shards: 5x4x2
+            if vp_size == 1:
+                lm = shard['model']['language_model']
+                vp_offset = 0
+                pp_offset = int(pp_rank * num_layers/pp_size)
+            else:
+                lm = shard[f'model{vp_rank}']['language_model']
                 vp_offset = vp_rank * (pp_size * vp_layers) 
                 pp_offset = pp_rank * vp_layers
-                conv = lambda s: f".{str(int(s.groups()[0]) + pp_offset + vp_offset)}."
-                lm = shard[f'model{vp_rank}']['language_model']
-                print(f"model{vp_rank}, {pp_rank}, {vp_rank}")
-                if vp_rank == 0 and pp_rank == 0:
-                    # handle word embeddings / tensor parallel level
-                    embedding_shard = lm['embedding']['word_embeddings']['weight']
-                    add_or_combine_to_dict(word_embeddings, embedding_shard, target_key='weight')
+            print(f"model{vp_rank}, {pp_rank}, {vp_rank}")
+            conv = lambda s: f".{str(int(s.groups()[0]) + pp_offset + vp_offset)}."
 
-                    # stored_embedding = word_embeddings.get('weight')
-                    # if stored_embedding != None:
-                    #     word_embeddings = {"weight" : torch.cat([stored_embedding, embedding_shard], dim=0)}
-                    # else:
-                    #     word_embeddings = {"weight": embedding_shard}
+            if vp_rank == 0 and pp_rank == 0:
+                # handle word embeddings / tensor parallel level
+                embedding_shard = lm['embedding']['word_embeddings']['weight']
+                add_or_combine_to_dict(word_embeddings, embedding_shard, target_key='weight')
 
-                if pp_rank == (pp_size-1) and vp_rank == (vp_size-1):
-                    # convert Namespace-object to dict 
-                    if vars(cp_args).get('untie_embeddings_and_output_weights'):
-                        print("Having untied embeddings")
-                        output_layer_shard = lm['output_layer']['weight']
-                        add_or_combine_to_dict(output_layer, output_layer_shard, target_key='weight')
-                    # stored_output_layer = output_layer.get('weight')
-                    # if stored_output_layer != None:
-                    #     output_layer = {'weight': torch.cat([stored_output_layer, output_layer_shard], dim=0)}
-                    # else:
-                    #     output_layer = {"weight": output_layer_shard}
-
+            if pp_rank == (pp_size-1) and vp_rank == (vp_size-1):
+                # convert Namespace-object to dict 
+                if vars(cp_args).get('untie_embeddings_and_output_weights'):
+                    print("Having untied embeddings")
+                    output_layer_shard = lm['output_layer']['weight']
+                    add_or_combine_to_dict(output_layer, output_layer_shard, target_key='weight')
+            
+            for name, layer in lm['encoder'].items():
                 
-                for name, layer in lm['encoder'].items():
-                    
-                    layer = layer.to(DEVICE)
-                    layer_name = re.sub("\.(\d*)\.", conv, name)
-                    # state_dict_layer = encoder.get(layer_name)
-    
+                layer = layer.to(DEVICE)
+                layer_name = re.sub("\.(\d*)\.", conv, name)
+                print(name, " ---> ", layer_name)
+                # state_dict_layer = encoder.get(layer_name)
 
-                    if cp_args.swiglu:
-                        if "mlp.dense_h_to_4h" in name:
-                            up_proj, gate_proj = torch.chunk(layer, 2, dim=0)
-                            print("MLP shapes:", up_proj.shape, gate_proj.shape)
-                            up_proj_key = layer_name + ".up_proj"
-                            gate_proj_key = layer_name + ".gate_proj"
-                            add_or_combine_to_dict(encoder, up_proj, up_proj_key, dim=0)
-                            add_or_combine_to_dict(encoder, gate_proj, gate_proj_key, dim=0)
-                        else:
-                            if ('self_attention.dense.weight' in name) or \
-                                ('mlp.dense_4h_to_h' in name):
-                                add_or_combine_to_dict(encoder, layer, layer_name, dim=1)
-                            elif "layernorm" in layer_name:
-                                if tp_rank == 0:
-                                    # only take layernorms from the first layers
-                                    add_or_combine_to_dict(encoder, layer, layer_name)
-                            else:
-                                add_or_combine_to_dict(encoder, layer, layer_name, dim=0)
-   
+
+                if cp_args.swiglu:
+                    if "mlp.dense_h_to_4h" in name:
+                        up_proj, gate_proj = torch.chunk(layer, 2, dim=0)
+                        # print("MLP shapes:", up_proj.shape, gate_proj.shape)
+                        up_proj_key = layer_name + ".up_proj"
+                        gate_proj_key = layer_name + ".gate_proj"
+                        add_or_combine_to_dict(encoder, up_proj, up_proj_key, dim=0)
+                        add_or_combine_to_dict(encoder, gate_proj, gate_proj_key, dim=0)
                     else:
-                        # TODO: swiglu is a speacial case -> generalize
-                        add_or_combine_to_dict(encoder, layer, layer_name)
+                        if ('self_attention.dense.weight' in name) or \
+                            ('mlp.dense_4h_to_h' in name):
+                            add_or_combine_to_dict(encoder, layer, layer_name, dim=1)
+                        elif "layernorm" in layer_name:
+                            if tp_rank == 0:
+                                # only take layernorms from the first layers
+                                add_or_combine_to_dict(encoder, layer, layer_name)
+                        elif cp_args.num_key_value_heads != cp_args.num_attention_heads and ('self_attention.query_key_value.weight' in name):
+                            # 
+                            # (8, 4, 64, 1024).transpose(0,1)
+                            # 8 might be num key val heads, 4 
+                            # [sq, b, ((nq + 2 * nkv) * hn)] --> [sq, b, nkv, (nq // nkv + 2), hn] 
+
+                            shape = (-1,
+                                cp_args.num_attention_heads // cp_args.num_key_value_heads + 2, 
+                                cp_args.hidden_size // cp_args.num_attention_heads, 
+                                cp_args.hidden_size)
+                            print(shape)
+                            layer = layer.view(*shape)
+                            query_layer = layer[:,:-2].reshape(-1, cp_args.hidden_size)
+                            key_value_layer = layer[:,-2:].reshape(-1,cp_args.hidden_size)
+                            # num_key_value_groups = cp_args.num_attention_heads//cp_args.num_key_value_heads
+                            # query_layer, key_value_layer = split_gqa_tensor(layer, num_key_value_groups, cp_args.hidden_size // cp_args.num_attention_heads)
+
+                            # print(f"q_chunk: {q_chunk_size}: query_layer: {query_layer.shape}, kv_layer: {key_value_layer.shape}")
+                            kv_label = ''.join(layer_name.split('query_'))
+                            q_label = ''.join(layer_name.split('_key_value'))
+
+                            add_or_combine_to_dict(encoder, query_layer, q_label, dim=0)
+                            add_or_combine_to_dict(encoder, key_value_layer, kv_label, dim=0)
+
+                        else:
+                            add_or_combine_to_dict(encoder, layer, layer_name, dim=0)
+
+                else:
+                    # TODO: reformat above condition to only effect mlp_dense_h_to_4h
+                    add_or_combine_to_dict(encoder, layer, layer_name)
 
                         
     # encoder['output_layer'] = output_layer 
@@ -207,7 +250,7 @@ def main():
         c_out.write(str(iteration))
     parsed_output_path = os.path.join(output_path, "mp_rank_00", "model_optim_rng.pt") 
     torch.save(state_dict, parsed_output_path)
-    print(f"Succesfully saved the model to {parse_output_path}")
+    print(f"Succesfully saved the model to {parsed_output_path}")
 
                 
 
