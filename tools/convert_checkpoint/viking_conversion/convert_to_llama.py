@@ -16,40 +16,25 @@
 
 ####################################################################################################
 
-#
-# Note: If when running this conversion script you're getting an exception:
-#     ModuleNotFoundError: No module named 'megatron.model.enums'
-# you need to tell python where to find the clone of Megatron-LM, e.g.:
-#
-# cd /tmp
-# git clone https://github.com/NVIDIA/Megatron-LM
-# PYTHONPATH=/tmp/Megatron-LM python src/transformers/models/megatron_gpt2/convert_megatron_gpt2_checkpoint.py ...
-#
-# if you already have it cloned elsewhere, simply adjust the path to the existing path
-#
-# If the training was done using a Megatron-LM fork, e.g.,
-# https://github.com/microsoft/Megatron-DeepSpeed/ then chances are that you need to have that one
-# in your path, i.e., /path/to/Megatron-DeepSpeed/
-#
-
 import argparse
 import os
 import re
-import zipfile
-
+import datetime
 import torch
-import wget
 from transformers import AutoTokenizer, LlamaConfig
 import sys
 # change path to a relative path
-sys.path.append('/scratch/project_462000319/rluukkon/Megatron-DeepSpeed-jonabur/')
 sys.path.append(os.path.abspath(
     os.path.join(os.path.dirname(__file__),
                     os.path.pardir)))
 
-# Edited to be compatible with Megatron-DeepSpeed
-####################################################################################################
+MODES = {'default':0, 'debug':1}
+CUR_MODE = 'default'
 
+def log(s, mode='default'):
+    if MODES[mode]<=MODES[CUR_MODE]:
+        now = str(datetime.datetime.now())
+        print(f"{now.split('.')[:-1]}: {s}")
 
 def recursive_print(name, val, spaces=0):
     # Format the message.
@@ -72,7 +57,7 @@ def recursive_print(name, val, spaces=0):
 
 
 def fix_query_key_value_ordering(param, checkpoint_version, num_splits, num_heads, hidden_size):
-    print(f"Fix qkv_ord: num_splits: {num_splits} num_heads: {num_heads}, hidden_size: {hidden_size}")
+    log(f"Fix qkv_ord: num_splits: {num_splits} num_heads: {num_heads}, hidden_size: {hidden_size}", mode='debug')
     # Permutes layout of param tensor to [num_splits * num_heads * hidden_size, :]
     # for compatibility with later versions of NVIDIA Megatron-LM.
     # The inverse operation is performed inside Megatron-LM to read checkpoints:
@@ -129,8 +114,8 @@ def convert_megatron_checkpoint(args, input_state_dict, config):
 
     # The number of heads.
     heads = config.num_attention_heads
-    print("Query heads", heads)
-    print("KV heads", config.num_key_value_heads)
+    log(f"Query heads {heads}", mode='debug')
+    log(f"KV heads {config.num_key_value_heads}", mode='debug')
     
     # The hidden_size per head.
     hidden_size_per_head = config.hidden_size // config.num_attention_heads
@@ -162,19 +147,16 @@ def convert_megatron_checkpoint(args, input_state_dict, config):
 
     # The simple map of names for "automated" rules.
     megatron_to_transformers = {
-        #"attention.dense": ".attn.c_proj.",
-        #"self_attention.dense": ".attn.c_proj.",
         "attention.dense": ".self_attn.o_proj.",
         "self_attention.dense": ".self_attn.o_proj.",
         "mlp.dense_h_to_4h": ".mlp.c_fc.",
-        #"mlp.dense_4h_to_h": ".mlp.c_proj.",
         "mlp.dense_4h_to_h": ".mlp.down_proj.",
     }
     
 
     # Extract the layers.
     for key, val in transformer.items():
-        print(key)
+        log(key, mode='debug')
         # Match the name.
         m = layer_re.match(key)
 
@@ -189,7 +171,7 @@ def convert_megatron_checkpoint(args, input_state_dict, config):
         # Is it a weight or a bias?
         weight_or_bias = m.group(3)
 
-        print(f"{layer_idx} - {op_name} - {weight_or_bias}")
+        log(f"{layer_idx} - {op_name} - {weight_or_bias}", mode='debug')
         # The name of the layer.
         layer_name = f"transformer.h.{layer_idx}"
         layer_name = f"model.layers.{layer_idx}"
@@ -289,116 +271,116 @@ def convert_megatron_checkpoint(args, input_state_dict, config):
     # It should be done!
     return output_state_dict
 
+def validate_args(args):
+    assert not (args.path_to_merged_checkpoint and args.path_to_unmerged_checkpoint), "These flags are mutually exclusive"
+    assert (args.path_to_merged_checkpoint or args.path_to_unmerged_checkpoint), "One of these flags is required!"
+    assert not os.path.exists(args.output_dir), f"{args.output_dir} already exists and overwriting is not allowed"
+
 
 ####################################################################################################
 
-
 def main():
+    log("Starting the conversion")
     # Create the argument parser.
     parser = argparse.ArgumentParser()
     parser.add_argument("--print-checkpoint-structure", action="store_true")
     parser.add_argument(
-        "path_to_checkpoint",
+        "--path_to_merged_checkpoint",
         type=str,
-        help="Path to the checkpoint file (.zip archive or direct .pt file)",
+        help="Path to the checkpoint .pt file. \nMutually exclusive with --path_to_unmerged_checkpoint",
     )
     parser.add_argument(
-        "--config_file",
-        default="",
+        "--path_to_unmerged_checkpoint",
         type=str,
-        help="An optional config json file describing the pre-trained model.",
+        help="Path to the checkpoint dir (checkpoint/path/iter_xxxxxxx/). Will first merge checkpoint into a single shard. \nMutually exclusive with --path_to_merged_checkpoint",
     )
+
+    parser.add_argument(
+        "--merged_save_path",
+        type=str,
+        help="If given, saves the intermediate merged megatron file to the given path",
+        default=None
+    )
+
+    parser.add_argument(
+        "--config_file",
+        required=True,
+        type=str,
+        help="Config json file describing the pre-trained model.",
+    )
+
+    parser.add_argument(
+        '--tokenizer',
+        type=str,
+        help="If given, saves the given tokenizer with the model"
+    )
+
     parser.add_argument(
     "--output_dir",
     required=True,
     )
 
+    parser.add_argument(
+        "--debug",
+        action='store_true'
+    )
+    
     args = parser.parse_args()
 
-    # Extract the basename.
-    basename = os.path.dirname(args.path_to_checkpoint)
+    if args.debug:
+        global CUR_MODE
+        CUR_MODE='debug'
+    
+    validate_args(args)
 
-    # Load the model.
-    # the .zip is very optional, let's keep it for backward compatibility
-    print(f"Extracting PyTorch state dictionary from {args.path_to_checkpoint}")
-    if args.path_to_checkpoint.endswith(".zip"):
-        with zipfile.ZipFile(args.path_to_checkpoint, "r") as checkpoint:
-            with checkpoint.open("release/mp_rank_00/model_optim_rng.pt") as pytorch_dict:
-                input_state_dict = torch.load(pytorch_dict, map_location="cpu")
+    if args.path_to_unmerged_checkpoint:
+        from merge_partitions import merge_model, save_model, parse_output_path
+
+        if args.merged_save_path:
+            merged_output_path = parse_output_path(args.path_to_unmerged_checkpoint, args.merged_save_path)
+            assert not os.path.exists(os.path.join(merged_output_path, "mp_rank_00")), "Merged output dir already exists!"
+
+        log(f"Starting to merge model shards from {args.path_to_unmerged_checkpoint}")
+        input_state_dict = merge_model(args.path_to_unmerged_checkpoint)
+        log("...Done")
+        
+        if args.merged_save_path:
+            log(f"Saving the merged megatron model to {merged_output_path}")
+            save_model(input_state_dict, merged_output_path)
+
     else:
-        input_state_dict = torch.load(args.path_to_checkpoint, map_location="cpu")
+        log(f"Loading model shards from {args.path_to_merged_checkpoint}")
+        input_state_dict = torch.load(args.path_to_merged_checkpoint, map_location="cpu")
 
-    ds_args = input_state_dict.get("args", None)
-
-    # Read the config, or default to the model released by NVIDIA.
-    if args.config_file == "":
-        if ds_args is not None:
-            if ds_args.swiglu:
-                hidden_act = "silu"
-            elif ds_args.bias_gelu_fusion:
-                hidden_act = "gelu_fast"
-            elif ds_args.openai_gelu:
-                hidden_act = "gelu_new"
-            else:
-                hidden_act = "gelu"
-        else:
-            # in the very early days this used to be "gelu_new"
-            activation_function = "gelu_new"
-
-        # Spell out all parameters in case the defaults change.
-        config = LlamaConfig(
-            vocab_size=50304,
-            max_position_embeddings=2048,
-            num_hidden_layers=24,
-            num_attention_heads=16,
-            hidden_size=1024,
-            intermediate_size=4096,
-            hidden_act="silu",
-            resid_pdrop=0.1,
-            embd_pdrop=0.1,
-            attn_pdrop=0.1,
-            layer_norm_epsilon=1e-5,
-            initializer_range=0.02,
-            summary_type="cls_index",
-            summary_use_proj=True,
-            summary_activation=None,
-            summary_proj_to_labels=True,
-            summary_first_dropout=0.1,
-            scale_attn_weights=True,
-            use_cache=True,
-            bos_token_id=50256,
-            eos_token_id=50256,
-        )
-    else:
-        config = LlamaConfig.from_json_file(args.config_file)
-
+    config = LlamaConfig.from_json_file(args.config_file)
     config.architectures = ["LLaMAForCausalLM"]
 
     # Convert.
-    print("Converting")
-
+    log("Converting to HF LLaMAForCausalLM")
     output_state_dict = convert_megatron_checkpoint(args, input_state_dict, config)
-
+    log("...done")
     # Print the structure of converted state dict.
     if args.print_checkpoint_structure:
         recursive_print(None, output_state_dict)
 
     # Store the config to file.
-    print("Saving config")
+    log("Saving config")
     config.save_pretrained(args.output_dir)
+    log("...done")
 
     # Save tokenizer based on args
-    # print(f"Adding {tokenizer_class} tokenizer files")
-    # tokenizer.save_pretrained(args.output_dir)
-
+    if args.tokenizer:
+        log(f"Saving tokenizer from {args.tokenizer} to {args.output_dir}")
+        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+        tokenizer.save_pretrained(args.output_dir)
+        log("...Done")
+    
     # Store the state_dict to file.
     output_checkpoint_file = os.path.join(args.output_dir, "pytorch_model.bin")
-    print(f'Saving checkpoint to "{output_checkpoint_file}"')
+    log(f'Saving checkpoint to "{args.output_dir}"')
     torch.save(output_state_dict, output_checkpoint_file)
-    print("Done")
-    # print("Untied embeddings are not likely working as expected yet! Model conversion can seemingly work.")
-    
-
+    log("...Done")
+    log("Model conversion ready!")
 
 ####################################################################################################
 

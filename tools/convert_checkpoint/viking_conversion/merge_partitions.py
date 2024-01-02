@@ -5,22 +5,34 @@ from collections import OrderedDict
 import re
 import argparse
 import os
+from datetime import datetime
+
 ## Assumptions: 
 # swiglu
-# rotary positional
-# embeddings
+# rotary positional embeddings
+# untied embeddings
 # no bias (for bias just add '.bias' in addition to '.weight')
 
-    # Search in directory above this
-sys.path.append("/scratch/project_462000319/rluukkon/Megatron-DeepSpeed-jonabur")
-sys.path.append(os.path.abspath(
-    os.path.join(os.path.dirname(__file__),
-                    os.path.pardir)))
+# Search in directory above this
+sys.path.append(
+    os.path.abspath(
+        os.path.dirname(__file__).split("tools")[0])
+)
+# sys.path.append(os.path.abspath(
+#     os.path.join(os.path.dirname(__file__),
+#                     os.path.pardir,)))
 
 PARALLEL_RANK_PATTERN = re.compile("mp_rank_\d*_\d*")
 CP_ID_PATTERN = re.compile("iter_\d*")
 
 DEVICE = 'cpu'
+MODES = {'default':0, 'debug':1}
+CUR_MODE = 'default'
+
+def log(s, mode='default'):
+    if MODES[mode]<=MODES[CUR_MODE]:
+        now = str(datetime.now())
+        print(f"{now.split('.')[:-1]}: {s}")
 
 def recursive_print(m, level):
     if type(m) == dict or type(m) == OrderedDict:
@@ -36,9 +48,9 @@ def recursive_print(m, level):
                     print(f'{"#"*(level*4), k}')
                 recursive_print(v, level=level+1)
 
-def parse_output_path(args):
-    iter_id = CP_ID_PATTERN.search(args.path_to_checkpoint).group()
-    out = args.output_path
+def parse_output_path(path_to_checkpoint, output_path):
+    iter_id = CP_ID_PATTERN.search(path_to_checkpoint).group()
+    out = output_path
     output_path = os.path.join(out, iter_id)
     return output_path
 
@@ -47,7 +59,7 @@ def add_or_combine_to_dict(target, shard, target_key, dim=0):
     # key = new_key if new_key else target_key
     if target_value != None:
         target[target_key] = torch.cat([target_value, shard], dim=dim)
-        print(f"Adding {target_key}. New shape: {target[target_key].shape}")
+        log(f"Adding {target_key}. New shape: {target[target_key].shape}", mode='debug')
     else:
         target[target_key] = shard
 
@@ -62,44 +74,18 @@ def combine_swiglu_mlp(encoder):
         # delete temp proj keys
         encoder[".".join(up_key.split(".")[:-1])] = torch.cat([up, gate], dim=0)
 
-# from megatron-deepspeed. Attempt to replicate the logic from Meg-DS.
-def split_gqa_tensor(mixed_x_layer, num_key_value_groups, hidden_size_per_attention_head):
-    new_tensor_shape = mixed_x_layer.size()[:-1] + \
-                (-1, (num_key_value_groups + 2),
-                    hidden_size_per_attention_head)
-    mixed_x_layer = mixed_x_layer.view(*new_tensor_shape)
-    print("Shape at start", mixed_x_layer.shape)
-    print(f"> reshape: {mixed_x_layer.shape[:2]} + {(-1, hidden_size_per_attention_head)}")
-    query_layer = mixed_x_layer[:, :, :, :-2, :].reshape(mixed_x_layer.shape[:2] + (-1, hidden_size_per_attention_head))
-    print(f"> q {query_layer.shape}")
-    key_layer = mixed_x_layer[:, :, :, -2, :]
-    print(f"> k {key_layer.shape}")
-    value_layer = mixed_x_layer[:, :, :, -1, :]
-    print(f"> v {value_layer.shape}")
-    kv_layer = torch.cat([key_layer,value_layer], dim=0)
-    return query_layer, kv_layer
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "path_to_checkpoint",
-        type=str,
-        help="Path to the checkpoint file (.zip archive or direct .pt file)",
-    )
-    parser.add_argument(
-        "output_path",
-        help='Path to the output directory to store the converted checkpoint'
-    )
 
+def merge_model(path_to_checkpoint, mode='default'):
 
-    args = parser.parse_args()
-    chunks = [pt.absolute() for pt in Path(args.path_to_checkpoint).glob("*/model_optim_rng.pt")]
+    chunks = [pt.absolute() for pt in Path(path_to_checkpoint).glob("*/model_optim_rng.pt")]
     chunks = sorted(chunks)
     
-    print("Found chunks")
+    log("Found chunks")
     for chunk in chunks:
-        print(chunk)
+        print(f"## {chunk}")
+    print()
     cp_args = None 
     vp_size = 0
     tp_size = 0
@@ -108,7 +94,6 @@ def main():
     encoder = {}
     word_embeddings = {}
     output_layer = {}
-    output_path = parse_output_path(args)
     iteration = ""
     cp_version = ""
     tokens = ""
@@ -122,8 +107,8 @@ def main():
             tp_rank, pp_rank = int(tp_rank), int(pp_rank)
 
 
-        print("processing #", chunk.absolute())
-        print(f"tp_rank: {tp_rank}, pp_rank: {pp_rank}")
+        log(f"processing # {chunk.absolute()}")
+        log(f"tp_rank: {tp_rank}, pp_rank: {pp_rank}")
 
         shard = torch.load(chunk, map_location='cuda')
         if i == 0:
@@ -148,7 +133,7 @@ def main():
                 lm = shard[f'model{vp_rank}']['language_model']
                 vp_offset = vp_rank * (pp_size * vp_layers) 
                 pp_offset = pp_rank * vp_layers
-            print(f"model{vp_rank}, {pp_rank}, {vp_rank}")
+            log(f"model{vp_rank}, {pp_rank}, {vp_rank}", mode='debug')
             conv = lambda s: f".{str(int(s.groups()[0]) + pp_offset + vp_offset)}."
 
             if vp_rank == 0 and pp_rank == 0:
@@ -159,7 +144,7 @@ def main():
             if pp_rank == (pp_size-1) and vp_rank == (vp_size-1):
                 # convert Namespace-object to dict 
                 if vars(cp_args).get('untie_embeddings_and_output_weights'):
-                    print("Having untied embeddings")
+                    log("using untied embeddings", mode='debug')
                     output_layer_shard = lm['output_layer']['weight']
                     add_or_combine_to_dict(output_layer, output_layer_shard, target_key='weight')
             
@@ -167,9 +152,8 @@ def main():
                 
                 layer = layer.to(DEVICE)
                 layer_name = re.sub("\.(\d*)\.", conv, name)
-                print(name, " ---> ", layer_name)
+                log(f"{name}  --->  {layer_name}", mode='debug')
                 # state_dict_layer = encoder.get(layer_name)
-
 
                 if cp_args.swiglu:
                     if "mlp.dense_h_to_4h" in name:
@@ -188,23 +172,16 @@ def main():
                                 # only take layernorms from the first layers
                                 add_or_combine_to_dict(encoder, layer, layer_name)
                         elif cp_args.num_key_value_heads != cp_args.num_attention_heads and ('self_attention.query_key_value.weight' in name):
-                            # 
-                            # (8, 4, 64, 1024).transpose(0,1)
-                            # 8 might be num key val heads, 4 
+                             
                             # [sq, b, ((nq + 2 * nkv) * hn)] --> [sq, b, nkv, (nq // nkv + 2), hn] 
-
                             shape = (-1,
                                 cp_args.num_attention_heads // cp_args.num_key_value_heads + 2, 
                                 cp_args.hidden_size // cp_args.num_attention_heads, 
                                 cp_args.hidden_size)
-                            print(shape)
+
                             layer = layer.view(*shape)
                             query_layer = layer[:,:-2].reshape(-1, cp_args.hidden_size)
                             key_value_layer = layer[:,-2:].reshape(-1,cp_args.hidden_size)
-                            # num_key_value_groups = cp_args.num_attention_heads//cp_args.num_key_value_heads
-                            # query_layer, key_value_layer = split_gqa_tensor(layer, num_key_value_groups, cp_args.hidden_size // cp_args.num_attention_heads)
-
-                            # print(f"q_chunk: {q_chunk_size}: query_layer: {query_layer.shape}, kv_layer: {key_value_layer.shape}")
                             kv_label = ''.join(layer_name.split('query_'))
                             q_label = ''.join(layer_name.split('_key_value'))
 
@@ -240,26 +217,55 @@ def main():
         "checkpoint_version": cp_version,
         "tokens": tokens
     }
-    
+    return state_dict
+
+
+def save_model(state_dict, output_path):
     if not os.path.exists(os.path.join(output_path, "mp_rank_00")):
         os.makedirs(os.path.join(output_path, "mp_rank_00"))
     
     # Save latest iteration for megatron loader
-    iter_path =os.path.join('/'.join(output_path.split("/")[:-1]), 'latest_checkpointed_iteration.txt')
+    iter_path = os.path.join('/'.join(output_path.split("/")[:-1]), 'latest_checkpointed_iteration.txt')
     with open(iter_path, 'w') as c_out:
-        c_out.write(str(iteration))
+        c_out.write(str(state_dict["iteration"]))
     parsed_output_path = os.path.join(output_path, "mp_rank_00", "model_optim_rng.pt") 
     torch.save(state_dict, parsed_output_path)
-    print(f"Succesfully saved the model to {parsed_output_path}")
-
-                
+    log(    f"Succesfully saved the model to {parsed_output_path}")
 
 
+def main():
+    parser = argparse.ArgumentParser(description="Merge sharded Megatron-model into a single modelfile")
+    parser.add_argument(
+        "--path_to_unmerged_checkpoint",
+        type=str,
+        help="Path to the checkpoint file .pt file",
+    )
+    parser.add_argument(
+        "--output_path",
+        help='Path to the output directory to store the converted checkpoint',
+        required=True,
+    )
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        help='More detailed print about progress'
+    )
 
+    args = parser.parse_args()
+    if args.debug:
+        global CUR_MODE
+        CUR_MODE = 'debug'
+    
+    output_path = parse_output_path(args.path_to_unmerged_checkpoint, args.output_path)
+    if os.path.exists(os.path.join(output_path, "mp_rank_00")):
+        assert False, "Output path already exists and should be empty!"
+    log("Starting merging")
+    state_dict = merge_model(args.path_to_unmerged_checkpoint)
+    log("...Done")
+    log("Starting saving the model")
+    save_model(state_dict, output_path)
+    log("...Done")
 
-
-
-        
 
 if __name__ == '__main__':
     main()
