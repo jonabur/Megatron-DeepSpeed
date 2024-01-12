@@ -13,8 +13,8 @@
 #SBATCH --account=project_462000353
 #SBATCH --output=logs-13B_high_eps/%j-13B_high_eps.out
 #SBATCH --error=logs-13B_high_eps/%j-13B_high_eps.err
-#SBATCH --exclude=nid005138
-#SBATCH --exclude=nid005138,nid006369,nid005796
+#SBATCH --exclude=nid005138,nid006369,nid005796,nid007382
+#SBATCH --time-min 00-16:00:00
 
 mkdir -p workdir
 wd=$(realpath workdir)
@@ -164,9 +164,6 @@ CMD=" \
     --num-workers 0 \
     "
 
-echo $CMD
-
-
 c="fe"
 
 # Bind mask for one thread per core
@@ -177,6 +174,11 @@ BIND_MASK_1="0x${c}000000000000,0x${c}00000000000000,0x${c}0000,0x${c}000000,0x$
 
 BIND_MASK="$BIND_MASK_1"
 echo "Using --cpu-bind=mask_cpu:$BIND_MASK"
+
+# add a pythonuserbase to an empty dir to avoid problems with user's local
+# python install being imported into the singularity container.
+mkdir -p pythonuserbase
+export PYTHONUSERBASE=pythonuserbase
 
 echo $CMD
 
