@@ -14,7 +14,6 @@
 #SBATCH --output=logs-33B_high_eps/%j-33B_high_eps.out
 #SBATCH --error=logs-33B_high_eps/%j-33B_high_eps.err
 #SBATCH --exclude=nid005138,nid006369,nid005796,nid007382
-#SBATCH --time-min 00-16:00:00
 
 mkdir -p workdir
 wd=$(realpath workdir)
@@ -26,6 +25,10 @@ if [ -z $SLURM_JOB_ID ]; then
     sbatch "$0"
     exit
 fi
+
+# log starts
+./log_restart_info.sh | tee -a starts.log
+
 
 # distributed setup
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
