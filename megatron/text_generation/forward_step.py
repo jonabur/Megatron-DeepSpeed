@@ -123,9 +123,9 @@ def _forward_step_helper(model, tokens, position_ids, attention_mask,
 
     # Forward pass through the model.
     model.set_input_tensor(recv_buffer)
-    output_tensor = model(tokens, position_ids, attention_mask,
+    output_tensor = model(tokens, position_ids, attention_mask,# labels=tokens,
                           inference_params=inference_params)
-
+    print("output tensor:", output_tensor)
     # Send output to the next stage.
     send_to_next_pipeline_rank(output_tensor)
 

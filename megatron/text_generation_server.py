@@ -75,7 +75,7 @@ class MegatronGenerate(Resource):
             if not (0.0 < temperature <= 100.0):
                 return "temperature must be a positive number less than or equal to 100.0"
         
-        top_k = 0.0
+        top_k = 1
         if "top_k" in request.get_json():
             top_k = request.get_json()["top_k"]
             if not (type(top_k) == int):

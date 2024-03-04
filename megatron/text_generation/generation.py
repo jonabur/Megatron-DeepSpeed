@@ -16,6 +16,7 @@ from .forward_step import ForwardStep
 from .sampling import sample
 from .beam_utils import BeamHypotheses
 
+
 def score_and_return_on_first_stage(model, tokens, lengths):
     """Function for just scoring.
     Arguments:
@@ -186,7 +187,18 @@ def generate_tokens_probs_and_return_on_first_stage(
             # logits will be meanigful only in the last pipeline stage.
             logits = forward_step(tokens2use, positions2use, attention_mask2use)
             logits = logits[0]
+            ####
+            from torch.nn import CrossEntropyLoss
+            loss_fct = CrossEntropyLoss(reduction="none")
 
+            shift_logits = logits[:, :-1, :]
+            shift_labels = tokens2use[:, 1:]
+            # print(shift_logits, shift_labels)
+            print("Shift labels:\n", shift_labels)
+            print("Loss:", (loss_fct(shift_logits.transpose(1, 2), shift_labels)))
+            print("Loss:", (loss_fct(shift_logits.transpose(1, 2), shift_labels)).mean())
+
+            ###
             if mpu.is_pipeline_last_stage():
                 if prevent_newline_after_colon:
                     logits[tokens2use[:, -1] == tokenizer.tokenize(':')[0], -1, tokenizer.tokenize('\n')[0]] = -1e10 # disable "\n" after ":"
@@ -195,6 +207,8 @@ def generate_tokens_probs_and_return_on_first_stage(
 
                 # Sample.
                 last_token_logits = logits[:, -1, :]
+                print("last token logits")
+                print(logits)
                 new_sample = sample(last_token_logits,
                                     top_k=top_k,
                                     top_p=top_p,
@@ -419,11 +433,18 @@ def _build_attention_mask_and_position_ids(tokens):
 
     # Since we are not interested in loss-mask and reset attention/position
     # is also False, eod_token is not used so it is safe to set it to None.
+    tokenizer = get_tokenizer()
     attention_mask, _, position_ids = get_ltor_masks_and_position_ids(
         data=tokens,
         eod_token=None,
         reset_position_ids=False,
         reset_attention_mask=False,
         eod_mask_loss=False)
+    # attention_mask, _, position_ids = get_ltor_masks_and_position_ids(
+    #     data=tokens,
+    #     eod_token=None,
+    #     reset_position_ids=False,
+    #     reset_attention_mask=False,
+    #     eod_mask_loss=False)
 
     return attention_mask, position_ids

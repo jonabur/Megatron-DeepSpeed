@@ -105,7 +105,6 @@ class GPTModel(MegatronModule):
         labels: Tensor = None,
         inference_params=None,
     ):
-
         # Encoder embedding.
         if self.pre_process:
             decoder_input = self.embedding(input_ids=input_ids, position_ids=position_ids)
@@ -135,7 +134,6 @@ class GPTModel(MegatronModule):
         # [b s] => [s b]
         labels = labels.transpose(0, 1).contiguous()
         loss = tensor_parallel.vocab_parallel_cross_entropy(logits.float(), labels)
-
         # [s b] => [b, s]
         loss = loss.transpose(0, 1).contiguous()
         return loss
