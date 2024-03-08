@@ -49,11 +49,28 @@ except ImportError:
 
 FlashAttentionBuilder = get_accelerator().get_op_builder("FlashAttentionBuilder")
 flash_attn_builder = None
+# 
+# try:
+# #     from apex.normalization import MixedFusedRMSNorm
+# except ImportError:
+#     MixedFusedRMSNorm = None
 
-try:
-    from apex.normalization import MixedFusedRMSNorm
-except ImportError:
-    MixedFusedRMSNorm = None
+
+class MixedFusedRMSNorm(torch.nn.Module):
+    def __init__(self, hidden_size, eps=1e-5):
+        """
+        LlamaRMSNorm is equivalent to T5LayerNorm
+        """
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.ones(hidden_size))
+        self.variance_epsilon = eps
+
+    def forward(self, hidden_states):
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        return self.weight * hidden_states.to(input_dtype)
 
 
 """ We use the following notation throughout this file:
@@ -306,9 +323,10 @@ class CoreAttention(MegatronModule):
             query_layer.transpose(0, 1),   # [b * np, sq, hn]
             key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
             beta=0.0, alpha=(1.0/self.norm_factor))
-
+        print("Attention after Q*K/sqrt(h_dim)", matmul_result, matmul_result.sum())
         # change view to [b, np, sq, sk]
         attention_scores = matmul_result.view(*output_size)
+        print("Attention after transpose of Q*K/sqrt(h_dim)", attention_scores, attention_scores.sum())
 
         # ===========================
         # Attention probs and dropout
@@ -317,6 +335,7 @@ class CoreAttention(MegatronModule):
         # attention scores and attention mask [b, np, sq, sk]
         attention_probs = self.scale_mask_softmax(attention_scores,
                                                   attention_mask)
+        print("Attention after softmax", attention_probs, attention_probs.sum())
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
@@ -349,7 +368,7 @@ class CoreAttention(MegatronModule):
 
         # matmul: [b * np, sq, hn]
         context_layer = torch.bmm(attention_probs, value_layer.transpose(0, 1))
-
+        print("Attention after matmul V", context_layer, context_layer.sum())
         # change view [b, np, sq, hn]
         context_layer = context_layer.view(*output_size)
 
@@ -360,6 +379,7 @@ class CoreAttention(MegatronModule):
         new_context_layer_shape = context_layer.size()[:-2] + \
             (self.hidden_size_per_partition,)
         context_layer = context_layer.view(*new_context_layer_shape)
+        print("Attention after matmul V", context_layer, context_layer.sum())
 
         return context_layer
 
@@ -658,6 +678,9 @@ class ParallelAttention(MegatronModule):
         # =================================================
         # Pre-allocate memory for key-values for inference.
         # =================================================
+        
+
+        #torch.save(hidden_states, "debugging/meg_attention_hidden_states.pt")
         is_first_step = False
         if inference_params:
             if self.layer_number not in inference_params.key_value_memory_dict:
@@ -681,17 +704,22 @@ class ParallelAttention(MegatronModule):
         if self.attention_type == AttnType.self_attn:
             # Attention heads [sq, b, h] --> [sq, b, ((nq + 2 * nkv) * hn)]
             mixed_x_layer, _ = self.query_key_value(hidden_states)
-
+            print("Mixed layer shape", mixed_x_layer.shape)
             # [sq, b, ((nq + 2 * nkv) * hn)] --> [sq, b, nkv, (nq // nkv + 2), hn]
             new_tensor_shape = mixed_x_layer.size()[:-1] + \
                 (-1, (self.num_key_value_groups + 2),
                  self.hidden_size_per_attention_head)
             mixed_x_layer = mixed_x_layer.view(*new_tensor_shape)
-
+            print("new tensor shape", new_tensor_shape)
             # [sq, b, nkv, (nq // nkv + 2), hn] --> 3 [sq, b, np, hn]
             (query_layer,
              key_layer,
              value_layer) = self.split_tensor(mixed_x_layer)
+            
+            #torch.save(query_layer, "debugging/meg_attention_query_proj")
+            #torch.save(key_layer, "debugging/meg_attention_key_proj")
+            #torch.save(value_layer, "debugging/meg_attention_value_proj")
+            # assert False
 
             # Repeat kv
             if self.use_gqa:
@@ -721,12 +749,13 @@ class ParallelAttention(MegatronModule):
                 (self.num_attention_heads_per_partition,
                  self.hidden_size_per_attention_head)
             query_layer = query_layer.view(*new_tensor_shape)
-
+            
         # ==================================
         # Adjust key and value for inference
         # ==================================
 
         # duplicate the pos_emb for self attention
+        ##torch.save(rotary_pos_emb, "debugging/rotary_pos_emb_at_start.pt")
         if rotary_pos_emb is not None:
             if isinstance(rotary_pos_emb, tuple):
                 rotary_pos_emb = rotary_pos_emb
@@ -779,8 +808,24 @@ class ParallelAttention(MegatronModule):
         # apply relative positional encoding (rotary embedding)
         if rotary_pos_emb is not None:
             q_pos_emb, k_pos_emb = rotary_pos_emb
+            print("Before rotary")
+            print("q_pos_emb:", q_pos_emb)
+            print("k_pos_emb:", k_pos_emb)
+            print("query layer", query_layer, query_layer.sum())
+            print("key layer", key_layer, key_layer.sum())
+            ##torch.save(query_layer, "debugging/mg_query_before_rotary.pt")
+            ##torch.save(key_layer,   "debugging/mg_key_before_rotary.pt")
+            ##torch.save(q_pos_emb,   "debugging/mg_rotary_q_pos.pt")
+            ##torch.save(k_pos_emb,   "debugging/mg_rotary_k_pos.pt")
             query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb)
             key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb)
+            ##torch.save(query_layer, "debugging/mg_query_after_rotary.pt")
+            ##torch.save(key_layer, "debugging/mg_key_after_rotary.pt")
+            print("post rotary query layer - ")
+            print(query_layer, query_layer.sum())
+            print("post rotary key layer ")
+            print(key_layer, key_layer.sum())
+            
             # TODO, can apply positional embedding to value_layer so it has
             # absolute positional embedding.
             # otherwise, only relative positional embedding takes effect
@@ -819,12 +864,18 @@ class ParallelAttention(MegatronModule):
                 else:
                     context_layer = self.core_attention(
                         query_layer, key_layer, value_layer, attention_mask)
+                    print("Core Attention output:", context_layer, context_layer.sum())
 
         # =================
         # Output. [sq, b, h]
         # =================
 
+        ##torch.save(context_layer, 'mg_input_before_dense.pt') 
         output, bias = self.dense(context_layer)
+        # ##torch.save(self.dense.weight, "megatron_dense_weight.pt")
+        print("After dense layer", output, output.sum())
+        print("After dense bias", bias)
+        # assert False
 
         return output, bias
 
@@ -833,8 +884,10 @@ def bias_dropout_add(x, bias, residual, prob, training):
     # type: (Tensor, Optional[Tensor], Tensor, float, bool) -> Tensor
     if bias is not None:
         x = x + bias
+    # print("Dropout in", /x)
     out = torch.nn.functional.dropout(x, p=prob, training=training)
     out = residual + out
+    # print("Dropout out", out)
     return out
 
 
@@ -1213,9 +1266,13 @@ class ParallelTransformerLayer(MegatronModule):
                 inference_params=None,
                 rotary_pos_emb=None):
         # hidden_states: [s, b, h]
-
+        print(">>>  START OF A FORWARD PASS")
+        print("Hidden states:", hidden_states)
+        print("Hidden states sum:", hidden_states.sum())
         # Layer norm at the beginning of the transformer layer.
         layernorm_output = self.input_layernorm(hidden_states)
+        print("layernom:", layernorm_output)
+        print("layernom sum:", layernorm_output.sum())
 
         # Self attention.
         attention_output, attention_bias = \
@@ -1224,13 +1281,14 @@ class ParallelTransformerLayer(MegatronModule):
                 attention_mask,
                 inference_params=inference_params,
                 rotary_pos_emb=rotary_pos_emb)
-
+        print("Attention output:", attention_output)
+        print("Attention sum:", attention_output.sum())
         # Residual connection.
         if self.apply_residual_connection_post_layernorm:
             residual = layernorm_output
         else:
             residual = hidden_states
-
+        print("Residual:", residual)
         if self.drop_path is None:
             # jit scripting for a nn.module (with dropout) is not
             # trigerring the fusion kernel. For now, we use two
@@ -1240,26 +1298,42 @@ class ParallelTransformerLayer(MegatronModule):
                 if self.training:
                     bias_dropout_add_func = bias_dropout_add_fused_train
                 else:
+                    print("Bias fusion")
                     bias_dropout_add_func = bias_dropout_add_fused_inference
             else:
+                print("Bias dropout function")
                 bias_dropout_add_func = get_bias_dropout_add(self.training)
 
             if attention_bias is not None:
                 attention_bias = attention_bias.expand_as(residual)
             with self.bias_dropout_add_exec_handler():
+                print("Param 1: Attention output:", attention_output)
+                print("Param 1: Attention output sum:", attention_output.sum())
+                print("Param 2: attention bias:", attention_bias)
+                print("Param 3: residual", residual)
+                print("Param 3: residual sum", residual.sum())
+                print("Param 4: hidden dropout", self.hidden_dropout)
+                print("Sum of attention + residual", attention_output + residual)
+                print("Sum of attention + residual, sum", (attention_output + residual).sum())
                 layernorm_input = bias_dropout_add_func(
                     attention_output,
                     attention_bias,
                     residual,
                     self.hidden_dropout)
         else:
+            print("Dropout:")
             out = torch.nn.functional.dropout(attention_output + attention_bias,
                                               p=self.hidden_dropout,
                                               training=self.training)
+            print(out)
             layernorm_input = residual + self.drop_path(out)
+            print("Layernorm input:", layernorm_input)
 
+        print("Layernorm input:", layernorm_input)
         # Layer norm post the self attention.
+        print("Layernorm function:", self.post_attention_layernorm)
         layernorm_output = self.post_attention_layernorm(layernorm_input)
+        print("Layernorm output:", layernorm_output)
 
         # Cross attention.
         if self.layer_type == LayerType.encoder:
@@ -1303,12 +1377,13 @@ class ParallelTransformerLayer(MegatronModule):
         else:
             mlp_output, moe_loss, _ = self.mlp(layernorm_output)
 
+        print("mlp output:", mlp_output)
         # Second residual connection.
         if self.apply_residual_connection_post_layernorm:
             residual = layernorm_output
         else:
             residual = layernorm_input
-
+        print("residual:", residual)
         if self.drop_path is None:
             if mlp_bias is not None:
                 mlp_bias = mlp_bias.expand_as(residual)
@@ -1336,7 +1411,7 @@ class ParallelTransformerLayer(MegatronModule):
                                               p=self.hidden_dropout,
                                               training=self.training)
             output = residual + self.drop_path(out)
-
+        print("Forward pass output:", output)
         if self.layer_type == LayerType.retro_decoder_with_retriever:
             return output, retriever_output, moe_loss
         else:

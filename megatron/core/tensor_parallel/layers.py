@@ -270,9 +270,16 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
         else:
             total_input = input
 
+        print("Linear with grad accumulation async total input", total_input, total_input.sum())
+        print("Linear with grad accumulation async weight", weight.t(), weight.t().sum(), weight.t().shape)
+        #torch.save(total_input, "debugging/meg_fused_attention_input.pt")
+        #torch.save(weight, "debugging/meg_fused_attention_weight.pt")
         output = torch.matmul(total_input, weight.t())
+        # assert False
+        print("Linear with grad accumulation async weight output", output, output.sum())
         if bias is not None:
             output = output + bias
+        print("Linear with grad accumulation async weight output after bias", output, output.sum())
         return output
 
     @staticmethod
@@ -762,11 +769,13 @@ class RowParallelLinear(torch.nn.Module):
             - bias
         """
         # Set up backprop all-reduce.
+        print("Attention dense input:", input_, input_.sum())
         if self.input_is_parallel or self.is_expert_without_slicing:
             input_parallel = input_
         else:
             assert not self.sequence_parallel
             input_parallel = scatter_to_tensor_model_parallel_region(input_)
+        print("Attention input parallel", input_parallel, input_parallel.sum())
         # Matrix multiply.
         output_parallel = linear_with_grad_accumulation_and_async_allreduce(
             input=input_parallel,
@@ -776,6 +785,8 @@ class RowParallelLinear(torch.nn.Module):
             async_grad_allreduce=False,
             sequence_parallel=False,
         )
+
+        print("Attention linear output parallel", output_parallel, output_parallel.sum())
 
         # All-reduce across all the partitions.
         if self.sequence_parallel:

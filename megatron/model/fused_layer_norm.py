@@ -85,6 +85,7 @@ class MixedFusedLayerNorm(torch.nn.Module):
               "This warning should only be triggered in the FusedLayerNorm unit tests.")
         return F.layer_norm(input, self.normalized_shape, weight, self.bias, self.eps)
 
+    print("Norm params:", input.shape, type(weight), self.bias, self.normalized_shape, self.eps)
     if self.no_persist_layer_norm:
         # Apex does not have versions yet (https://github.com/NVIDIA/apex/pull/1648), so we need to inspect 
         # the function manually on whether the extra arg introduced in https://github.com/NVIDIA/apex/pull/1715 exists yet

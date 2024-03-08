@@ -348,6 +348,7 @@ def git_ds_info():
 if __name__ == "__main__":
     # torch.multiprocessing.set_start_method('spawn')
 
+    torch.use_deterministic_algorithms(True)
     git_ds_info()
     pretrain(train_valid_test_datasets_provider,
              model_provider,
