@@ -70,6 +70,7 @@ class MegatronGenerate(Resource):
         temperature = 1.0
         if "temperature" in request.get_json():
             temperature = request.get_json()["temperature"]
+
             if not (type(temperature) == int or type(temperature) == float):
                 return "temperature must be a positive number less than or equal to 100.0"
             if not (0.0 < temperature <= 100.0):
@@ -184,6 +185,10 @@ class MegatronGenerate(Resource):
                 print("start time: ", datetime.datetime.now())
             
             try:
+                
+                print("Setting temperature from", temperature, 'to', end=' ')
+                temperature = 0.2
+                print(temperature)
                 if beam_width is not None:
                     MegatronGenerate.send_do_beam_search()  # Tell other ranks we're doing beam_search
                     response, response_seg, response_scores = \
