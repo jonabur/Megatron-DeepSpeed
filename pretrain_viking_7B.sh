@@ -6,7 +6,7 @@
 #SBATCH --ntasks-per-node=8
 #SBATCH --mem=0
 #SBATCH --partition=standard-g
-#SBATCH --time=02-00:00:00
+#SBATCH --time=01-00:00:00
 #SBATCH --gpus-per-node=mi250:8
 #SBATCH --exclusive=user
 #SBATCH --hint=nomultithread
@@ -201,6 +201,7 @@ srun \
     -B "$wd"/cray-deps:/opt/cray-deps \
     -B "$wd":/workdir \
     -B "$SING_BIND" \
+    -B "$PWD" \
     "$CONTAINER" \
     ./launch.sh \
     $CMD
